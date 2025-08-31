@@ -214,9 +214,13 @@ func (l *Loader) Load(models ...any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = db.AutoMigrate(orderedTables...); err != nil {
-		return "", err
+
+	for _, model := range orderedTables {
+		if err := AutoMigrateModel(db, model); err != nil {
+			return "", err
+		}
 	}
+
 	if err = cm.CreateViews(views); err != nil {
 		return "", err
 	}
