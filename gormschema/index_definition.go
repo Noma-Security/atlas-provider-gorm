@@ -109,6 +109,17 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 	if tabler, ok := any(model).(schema.Tabler); ok {
 		return db.Table(tabler.TableName()).AutoMigrate(ptr)
 	}
+	// Also handle pointer-receiver TableName() methods by asserting on *T when model is T.
+	mt := reflect.TypeOf(model)
+	var ptrModel any
+	if mt.Kind() == reflect.Ptr {
+		ptrModel = model
+	} else {
+		ptrModel = reflect.New(mt).Interface()
+	}
+	if tabler, ok := ptrModel.(schema.Tabler); ok {
+		return db.Table(tabler.TableName()).AutoMigrate(ptr)
+	}
 	return db.AutoMigrate(ptr)
 }
 

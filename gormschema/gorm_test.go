@@ -36,6 +36,24 @@ func TestSQLiteConfig(t *testing.T) {
 	resetSession()
 }
 
+func TestAutoMigrateModelTableName(t *testing.T) {
+	resetSession()
+
+	modelTableNameMapping := map[any]string{
+		models.TestModelValueReceiver{}:            models.TestModelValueReceiver{}.TableName(),
+		models.TestModelTableNamePointerReceiver{}: (&models.TestModelTableNamePointerReceiver{}).TableName(),
+	}
+	l := gormschema.New("postgres")
+	for model, tableName := range modelTableNameMapping {
+		t.Run(tableName, func(t *testing.T) {
+			sql, err := l.Load(
+				model,
+			)
+			require.NoError(t, err)
+			require.Contains(t, sql, tableName)
+		})
+	}
+}
 func TestPostgreSQLConfig(t *testing.T) {
 	resetSession()
 	l := gormschema.New("postgres")
