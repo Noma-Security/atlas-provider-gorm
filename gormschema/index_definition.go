@@ -15,16 +15,18 @@ import (
 
 // Column selector + per-column options.
 type Col[T any] struct {
-	Sel   func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
-	Sort  string       // "", "asc", "desc"
-	Nulls string       // "", "first", "last" (used as `sort:desc nulls last`)
+	Sel     func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
+	Sort    string       // "", "asc", "desc"
+	Nulls   string       // "", "first", "last" (used as `sort:desc nulls last`)
+	OpClass string       // operator class, e.g. "gin_trgm_ops" (PostgreSQL) - maps to GORM's "class:" tag
 }
 
-func Field[T any](sel func(*T) any) Col[T] { return Col[T]{Sel: sel} }
-func Asc[T any](c Col[T]) Col[T]           { c.Sort = "asc"; return c }
-func Desc[T any](c Col[T]) Col[T]          { c.Sort = "desc"; return c }
-func NullsFirst[T any](c Col[T]) Col[T]    { c.Nulls = "first"; return c }
-func NullsLast[T any](c Col[T]) Col[T]     { c.Nulls = "last"; return c }
+func Field[T any](sel func(*T) any) Col[T]     { return Col[T]{Sel: sel} }
+func Asc[T any](c Col[T]) Col[T]               { c.Sort = "asc"; return c }
+func Desc[T any](c Col[T]) Col[T]              { c.Sort = "desc"; return c }
+func NullsFirst[T any](c Col[T]) Col[T]        { c.Nulls = "first"; return c }
+func NullsLast[T any](c Col[T]) Col[T]         { c.Nulls = "last"; return c }
+func Class[T any](c Col[T], cls string) Col[T] { c.OpClass = cls; return c }
 
 // IndexDefinition declares a composite (or single-column) index.
 type IndexDefinition[T any] struct {
@@ -32,6 +34,7 @@ type IndexDefinition[T any] struct {
 	Columns []Col[T] // order => priority:1..N
 	Unique  bool
 	Where   string // e.g. "deleted_at IS NULL"
+	Type    string // index method, e.g. "gin", "gist", "btree" (PostgreSQL) - maps to GORM's "type:" tag
 }
 
 // AutoMigrateModel inspects 'model' for an Indexes() method.
@@ -126,11 +129,12 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			return nil, fmt.Errorf("Indexes()[%d] is not a struct", i)
 		}
 
-		// Expect fields: Name string, Columns []Col[?], Unique bool, Where string
+		// Expect fields: Name string, Columns []Col[?], Unique bool, Where string, Type string
 		nameF := def.FieldByName("Name")
 		colsF := def.FieldByName("Columns")
 		uniqueF := def.FieldByName("Unique")
 		whereF := def.FieldByName("Where")
+		typeF := def.FieldByName("Type")
 
 		if !nameF.IsValid() || !colsF.IsValid() || !uniqueF.IsValid() || !whereF.IsValid() {
 			return nil, fmt.Errorf("Indexes()[%d] doesn't look like IndexDefinition", i)
@@ -138,6 +142,10 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 		name := nameF.String()
 		unique := uniqueF.Bool()
 		where := strings.TrimSpace(whereF.String())
+		indexType := ""
+		if typeF.IsValid() {
+			indexType = strings.TrimSpace(typeF.String())
+		}
 
 		if colsF.Kind() != reflect.Slice {
 			return nil, fmt.Errorf("Index %q: Columns is not a slice", name)
@@ -151,9 +159,10 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 				return nil, fmt.Errorf("Index %q column %d: not a struct", name, j+1)
 			}
 
-			selF := col.FieldByName("Sel")   // func(*T) any
-			sortF := col.FieldByName("Sort") // string
-			nullF := col.FieldByName("Nulls")
+			selF := col.FieldByName("Sel")         // func(*T) any
+			sortF := col.FieldByName("Sort")       // string
+			nullF := col.FieldByName("Nulls")      // string
+			opClassF := col.FieldByName("OpClass") // string
 
 			if !selF.IsValid() {
 				return nil, fmt.Errorf("Index %q column %d: missing Sel", name, j+1)
@@ -179,6 +188,14 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			}
 			if j == 0 && where != "" {
 				parts = append(parts, "where:"+where)
+			}
+			if j == 0 && indexType != "" {
+				parts = append(parts, "type:"+indexType)
+			}
+			if opClassF.IsValid() {
+				if cls := strings.TrimSpace(opClassF.String()); cls != "" {
+					parts = append(parts, "class:"+cls)
+				}
 			}
 
 			fieldToIndexTags[fname] = append(fieldToIndexTags[fname], strings.Join(parts, ","))
