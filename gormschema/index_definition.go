@@ -30,11 +30,12 @@ func Class[T any](c Col[T], cls string) Col[T] { c.OpClass = cls; return c }
 
 // IndexDefinition declares a composite (or single-column) index.
 type IndexDefinition[T any] struct {
-	Name    string
-	Columns []Col[T] // order => priority:1..N
-	Unique  bool
-	Where   string // e.g. "deleted_at IS NULL"
-	Type    string // index method, e.g. "gin", "gist", "btree" (PostgreSQL) - maps to GORM's "type:" tag
+	Name       string
+	Columns    []Col[T] // order => priority:1..N
+	Unique     bool
+	Where      string   // e.g. "deleted_at IS NULL"
+	Type       string   // index method, e.g. "gin", "gist", "btree" (PostgreSQL) - maps to GORM's "type:" tag
+	Extensions []string // required PostgreSQL extensions, e.g. ["pg_trgm", "btree_gin"]
 }
 
 // AutoMigrateModel inspects 'model' for an Indexes() method.
@@ -126,6 +127,65 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 	return db.AutoMigrate(ptr)
 }
 
+// ExtractRequiredExtensions returns all required extensions from a model's Indexes() method.
+// Returns nil if the model has no Indexes() or no extensions are required.
+func ExtractRequiredExtensions(model any) []string {
+	if model == nil {
+		return nil
+	}
+
+	mv := reflect.ValueOf(model)
+	var recv reflect.Value
+	if mv.Kind() == reflect.Ptr {
+		recv = mv
+	} else {
+		p := reflect.New(mv.Type())
+		p.Elem().Set(mv)
+		recv = p
+	}
+
+	method := recv.MethodByName("Indexes")
+	if !method.IsValid() {
+		return nil
+	}
+	if method.Type().NumIn() != 0 || method.Type().NumOut() != 1 {
+		return nil
+	}
+
+	out := method.Call(nil)[0]
+	if out.Kind() != reflect.Slice || out.Len() == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var extensions []string
+
+	for i := 0; i < out.Len(); i++ {
+		def := out.Index(i)
+		if def.Kind() == reflect.Pointer {
+			def = def.Elem()
+		}
+		if def.Kind() != reflect.Struct {
+			continue
+		}
+
+		extsF := def.FieldByName("Extensions")
+		if !extsF.IsValid() || extsF.Kind() != reflect.Slice {
+			continue
+		}
+
+		for j := 0; j < extsF.Len(); j++ {
+			ext := extsF.Index(j).String()
+			if ext != "" && !seen[ext] {
+				seen[ext] = true
+				extensions = append(extensions, ext)
+			}
+		}
+	}
+
+	return extensions
+}
+
 // -------- internals --------
 
 func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
@@ -205,7 +265,10 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			}
 			if opClassF.IsValid() {
 				if cls := strings.TrimSpace(opClassF.String()); cls != "" {
-					parts = append(parts, "class:"+cls)
+					// Use expression: with column_name + operator_class
+					// GORM uses the expression literally in the CREATE INDEX statement
+					colName := toSnakeCase(fname)
+					parts = append(parts, "expression:"+colName+" "+cls)
 				}
 			}
 
@@ -325,4 +388,32 @@ func indirectType(t reflect.Type) reflect.Type {
 		t = t.Elem()
 	}
 	return t
+}
+
+// toSnakeCase converts a Go field name to snake_case (GORM's default column naming)
+// Handles consecutive uppercase letters correctly: TenantID -> tenant_id, HTTPServer -> http_server
+func toSnakeCase(s string) string {
+	if s == "" {
+		return s
+	}
+	var result strings.Builder
+	runes := []rune(s)
+	for i, r := range runes {
+		if r >= 'A' && r <= 'Z' {
+			// Add underscore before uppercase if:
+			// - not at the start AND
+			// - (previous char is lowercase OR next char is lowercase)
+			if i > 0 {
+				prevLower := runes[i-1] >= 'a' && runes[i-1] <= 'z'
+				nextLower := i+1 < len(runes) && runes[i+1] >= 'a' && runes[i+1] <= 'z'
+				if prevLower || nextLower {
+					result.WriteByte('_')
+				}
+			}
+			result.WriteRune(r + 32) // lowercase
+		} else {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }

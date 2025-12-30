@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"ariga.io/atlas/sdk/recordriver"
 	"github.com/stretchr/testify/require"
 )
 
@@ -134,11 +135,11 @@ func TestCollectIndexTagsWithOpClass(t *testing.T) {
 	require.NotContains(t, tags["ScanVersion"][0], "type:")
 	require.NotContains(t, tags["ScanVersion"][0], "class:")
 
-	// FileName should have priority:3 and class:gin_trgm_ops
+	// FileName should have priority:3 and expression with gin_trgm_ops
 	require.Contains(t, tags, "FileName")
 	require.Len(t, tags["FileName"], 1)
 	require.Contains(t, tags["FileName"][0], "priority:3")
-	require.Contains(t, tags["FileName"][0], "class:gin_trgm_ops")
+	require.Contains(t, tags["FileName"][0], "expression:file_name gin_trgm_ops")
 	require.NotContains(t, tags["FileName"][0], "type:")
 }
 
@@ -152,18 +153,18 @@ func TestCollectIndexTagsWithMultipleOpClasses(t *testing.T) {
 	tags, err := collectIndexTagsFromIndexesValue(baseStruct, defsSlice)
 	require.NoError(t, err)
 
-	// Field1: first column, has type:gist and class:text_pattern_ops
+	// Field1: first column, has type:gist and expression with text_pattern_ops
 	require.Contains(t, tags, "Field1")
 	require.Contains(t, tags["Field1"][0], "type:gist")
-	require.Contains(t, tags["Field1"][0], "class:text_pattern_ops")
+	require.Contains(t, tags["Field1"][0], "expression:field1 text_pattern_ops")
 
-	// Field2: no class
+	// Field2: no operator class
 	require.Contains(t, tags, "Field2")
-	require.NotContains(t, tags["Field2"][0], "class:")
+	require.NotContains(t, tags["Field2"][0], "expression:")
 
-	// Field3: has class:gin_trgm_ops
+	// Field3: has expression with gin_trgm_ops
 	require.Contains(t, tags, "Field3")
-	require.Contains(t, tags["Field3"][0], "class:gin_trgm_ops")
+	require.Contains(t, tags["Field3"][0], "expression:field3 gin_trgm_ops")
 }
 
 // Test model without Type or OpClass (backward compatibility)
@@ -248,6 +249,133 @@ func findTagContaining(tags []string, substr string) string {
 	return ""
 }
 
+func TestExtractRequiredExtensions(t *testing.T) {
+	// TestNotebookFile doesn't have extensions
+	exts := ExtractRequiredExtensions(TestNotebookFile{})
+	require.Nil(t, exts)
+
+	// Test with a model that has extensions
+	exts = ExtractRequiredExtensions(TestWithExtensions{})
+	require.Len(t, exts, 2)
+	require.Contains(t, exts, "pg_trgm")
+	require.Contains(t, exts, "btree_gin")
+}
+
+func TestExtractRequiredExtensionsNilModel(t *testing.T) {
+	exts := ExtractRequiredExtensions(nil)
+	require.Nil(t, exts)
+}
+
+func TestExtractRequiredExtensionsNoIndexesMethod(t *testing.T) {
+	// A simple struct with no Indexes() method
+	type NoIndexes struct {
+		ID   uint
+		Name string
+	}
+	exts := ExtractRequiredExtensions(NoIndexes{})
+	require.Nil(t, exts)
+}
+
+func TestExtractRequiredExtensionsDeduplication(t *testing.T) {
+	exts := ExtractRequiredExtensions(TestMultipleIndexesWithExtensions{})
+	// Should deduplicate: both indexes require pg_trgm
+	require.Len(t, exts, 2)
+	require.Contains(t, exts, "pg_trgm")
+	require.Contains(t, exts, "btree_gin")
+}
+
+// Test model with multiple indexes that have overlapping extensions
+type TestMultipleIndexesWithExtensions struct {
+	ID     uint `gorm:"primaryKey"`
+	Field1 string
+	Field2 string
+}
+
+func (TestMultipleIndexesWithExtensions) TableName() string {
+	return "multi_idx_ext"
+}
+
+func (TestMultipleIndexesWithExtensions) Indexes() []IndexDefinition[TestMultipleIndexesWithExtensions] {
+	return []IndexDefinition[TestMultipleIndexesWithExtensions]{
+		{
+			Name: "idx_1",
+			Columns: []Col[TestMultipleIndexesWithExtensions]{
+				Class(
+					Field(func(m *TestMultipleIndexesWithExtensions) any { return &m.Field1 }),
+					"gin_trgm_ops",
+				),
+			},
+			Type:       "gin",
+			Extensions: []string{"pg_trgm", "btree_gin"},
+		},
+		{
+			Name: "idx_2",
+			Columns: []Col[TestMultipleIndexesWithExtensions]{
+				Class(
+					Field(func(m *TestMultipleIndexesWithExtensions) any { return &m.Field2 }),
+					"gin_trgm_ops",
+				),
+			},
+			Type:       "gin",
+			Extensions: []string{"pg_trgm"}, // duplicate, should be deduped
+		},
+	}
+}
+
+func TestToSnakeCase(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"FileName", "file_name"},
+		{"TenantID", "tenant_id"},
+		{"ID", "id"},
+		{"Name", "name"},
+		{"ScanVersion", "scan_version"},
+		{"field1", "field1"},
+		{"Field1", "field1"},
+		{"HTTPServer", "http_server"},
+		{"UserID", "user_id"},
+		{"APIKey", "api_key"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := toSnakeCase(tt.input)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// Test model with extensions
+type TestWithExtensions struct {
+	ID       uint `gorm:"primaryKey"`
+	TenantID string
+	FileName string
+}
+
+func (TestWithExtensions) TableName() string {
+	return "with_extensions"
+}
+
+func (TestWithExtensions) Indexes() []IndexDefinition[TestWithExtensions] {
+	return []IndexDefinition[TestWithExtensions]{
+		{
+			Name: "idx_with_extensions_trgm",
+			Columns: []Col[TestWithExtensions]{
+				Field(func(m *TestWithExtensions) any { return &m.TenantID }),
+				Class(
+					Field(func(m *TestWithExtensions) any { return &m.FileName }),
+					"gin_trgm_ops",
+				),
+			},
+			Type:       "gin",
+			Extensions: []string{"pg_trgm", "btree_gin"},
+		},
+	}
+}
+
 func TestClassHelper(t *testing.T) {
 	col := Field(func(m *TestNotebookFile) any { return &m.FileName })
 	require.Equal(t, "", col.OpClass)
@@ -264,4 +392,61 @@ func TestColChaining(t *testing.T) {
 	)
 	require.Equal(t, "desc", col.Sort)
 	require.Equal(t, "gin_trgm_ops", col.OpClass)
+}
+
+func TestGinIndexWithExtensionsSQLOutput(t *testing.T) {
+	resetTestSession()
+
+	l := New("postgres")
+	sql, err := l.Load(TestGinModel{})
+	require.NoError(t, err)
+
+	// Should contain CREATE EXTENSION statements
+	require.Contains(t, sql, `CREATE EXTENSION IF NOT EXISTS "pg_trgm"`)
+	require.Contains(t, sql, `CREATE EXTENSION IF NOT EXISTS "btree_gin"`)
+
+	// Should contain CREATE TABLE
+	require.Contains(t, sql, `CREATE TABLE "gin_test"`)
+
+	// Should contain CREATE INDEX with USING gin and the expression
+	require.Contains(t, sql, "USING gin")
+	require.Contains(t, sql, "file_name gin_trgm_ops")
+
+	// Print the SQL for debugging
+	t.Logf("Generated SQL:\n%s", sql)
+}
+
+// Test model for SQL output test
+type TestGinModel struct {
+	ID       uint   `gorm:"primaryKey"`
+	TenantID string `gorm:"type:text"`
+	FileName string `gorm:"type:text"`
+}
+
+func (TestGinModel) TableName() string {
+	return "gin_test"
+}
+
+func (TestGinModel) Indexes() []IndexDefinition[TestGinModel] {
+	return []IndexDefinition[TestGinModel]{
+		{
+			Name: "idx_gin_test_trgm",
+			Columns: []Col[TestGinModel]{
+				Field(func(m *TestGinModel) any { return &m.TenantID }),
+				Class(
+					Field(func(m *TestGinModel) any { return &m.FileName }),
+					"gin_trgm_ops",
+				),
+			},
+			Type:       "gin",
+			Extensions: []string{"pg_trgm", "btree_gin"},
+		},
+	}
+}
+
+func resetTestSession() {
+	sess, ok := recordriver.Session("gorm")
+	if ok {
+		sess.Statements = nil
+	}
 }
