@@ -136,29 +136,6 @@ func TestMySQLConfig(t *testing.T) {
 	requireEqualContent(t, sql, "testdata/mysql_custom_join_table.sql") // position of tables should not matter
 }
 
-func TestPostgreSQLGinIndexWithExtensions(t *testing.T) {
-	resetSession()
-	l := gormschema.New("postgres")
-	sql, err := l.Load(models.NotebookFile{})
-	require.NoError(t, err)
-
-	// Log the actual SQL for debugging
-	t.Logf("Generated SQL:\n%s", sql)
-
-	// Verify extensions are created
-	require.Contains(t, sql, `CREATE EXTENSION IF NOT EXISTS "pg_trgm"`)
-	require.Contains(t, sql, `CREATE EXTENSION IF NOT EXISTS "btree_gin"`)
-
-	// Verify the table and index are created
-	require.Contains(t, sql, `CREATE TABLE "notebook_files"`)
-	require.Contains(t, sql, "USING gin")
-	require.Contains(t, sql, "gin_trgm_ops")
-
-	// Compare against expected output
-	requireEqualContent(t, sql, "testdata/postgresql_gin_extensions.sql")
-	resetSession()
-}
-
 func TestSQLServerConfig(t *testing.T) {
 	resetSession()
 	l := gormschema.New("sqlserver", gormschema.WithStmtDelimiter("\nGO"))

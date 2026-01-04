@@ -215,11 +215,6 @@ func (l *Loader) Load(models ...any) (string, error) {
 		return "", err
 	}
 
-	// Collect and create required extensions from all models (must happen before AutoMigrate)
-	if err = createExtensions(db, orderedTables); err != nil {
-		return "", err
-	}
-
 	for _, model := range orderedTables {
 		if err := AutoMigrateModel(db, model); err != nil {
 			return "", err
@@ -429,24 +424,6 @@ func (m *migrator) orderModels(models ...any) ([]any, error) {
 		}
 	}
 	return append(otherTables, joinTables...), nil
-}
-
-// createExtensions creates required PostgreSQL extensions from all models.
-// Uses the main db connection to ensure statements are captured by recordriver.
-func createExtensions(db *gorm.DB, models []any) error {
-	seen := make(map[string]bool)
-	for _, model := range models {
-		for _, ext := range ExtractRequiredExtensions(model) {
-			if !seen[ext] {
-				seen[ext] = true
-				stmt := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %q", ext)
-				if err := db.Exec(stmt).Error; err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // CreateTriggers creates the triggers for the given models.
