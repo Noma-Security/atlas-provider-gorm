@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -26,6 +28,10 @@ func Asc[T any](c Col[T]) Col[T]           { c.Sort = "asc"; return c }
 func Desc[T any](c Col[T]) Col[T]          { c.Sort = "desc"; return c }
 func NullsFirst[T any](c Col[T]) Col[T]    { c.Nulls = "first"; return c }
 func NullsLast[T any](c Col[T]) Col[T]     { c.Nulls = "last"; return c }
+func WithOpClass[T any](c Col[T], opClass string) Col[T] {
+	c.OpClass = opClass
+	return c
+}
 
 // IndexDefinition declares a composite (or single-column) index.
 type IndexDefinition[T any] struct {
@@ -82,7 +88,7 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 	}
 
 	// Build field -> index-tag fragments from the returned definitions.
-	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(base, out)
+	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(db, base, out)
 	if err != nil {
 		return err
 	}
@@ -127,7 +133,7 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 
 // -------- internals --------
 
-func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
+func collectIndexTagsFromIndexesValue(db *gorm.DB, baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
 	fieldToIndexTags := map[string][]string{}
 
 	for i := 0; i < defsSlice.Len(); i++ {
@@ -153,7 +159,12 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 		name := nameF.String()
 		indexType := ""
 		if typeF.IsValid() {
-			indexType = strings.TrimSpace(typeF.String())
+			indexType = typeF.String()
+			switch indexType {
+			case "", "btree", "hash", "gist", "spgist", "gin", "brin":
+			default:
+				return nil, fmt.Errorf("index %q: invalid Type %q", name, indexType)
+			}
 		}
 		unique := uniqueF.Bool()
 		where := strings.TrimSpace(whereF.String())
@@ -196,7 +207,7 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			}
 			if opClassF.IsValid() {
 				if opClass := strings.TrimSpace(opClassF.String()); opClass != "" {
-					dbColumnName, err := dbColumnNameForField(baseStruct, fname)
+					dbColumnName, err := dbColumnNameForField(db, baseStruct, fname)
 					if err != nil {
 						return nil, fmt.Errorf("index %q column %d: %w", name, j+1, err)
 					}
@@ -282,7 +293,7 @@ func buildStructTag(kv map[string]string) reflect.StructTag {
 	}
 	parts := make([]string, 0, len(kv))
 	for k, v := range kv {
-		parts = append(parts, fmt.Sprintf(`%s:"%s"`, k, v))
+		parts = append(parts, fmt.Sprintf(`%s:%s`, k, strconv.Quote(v)))
 	}
 	sort.Strings(parts) // deterministic
 	return reflect.StructTag(strings.Join(parts, " "))
@@ -331,16 +342,22 @@ func indirectType(t reflect.Type) reflect.Type {
 	return t
 }
 
-func dbColumnNameForField(baseStruct reflect.Type, fieldName string) (string, error) {
+func dbColumnNameForField(db *gorm.DB, baseStruct reflect.Type, fieldName string) (string, error) {
 	sf, ok := baseStruct.FieldByName(fieldName)
 	if !ok {
 		return "", fmt.Errorf("field %q not found on %s", fieldName, baseStruct.Name())
 	}
 
 	tagSettings := schema.ParseTagSetting(sf.Tag.Get("gorm"), ";")
-	if column := strings.TrimSpace(tagSettings["COLUMN"]); column != "" {
-		return column, nil
+	columnName := strings.TrimSpace(tagSettings["COLUMN"])
+	if columnName == "" {
+		namingStrategy := db.Config.NamingStrategy
+		if namingStrategy == nil {
+			namingStrategy = schema.NamingStrategy{}
+		}
+		columnName = namingStrategy.ColumnName("", sf.Name)
 	}
 
-	return schema.NamingStrategy{}.ColumnName("", sf.Name), nil
+	stmt := &gorm.Statement{DB: db}
+	return stmt.Quote(clause.Column{Name: columnName}), nil
 }

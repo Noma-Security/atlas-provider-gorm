@@ -54,7 +54,7 @@ func (model *TestModelIndexOpClass) Indexes() []gormschema.IndexDefinition[TestM
 			Name: "idx_test_model_index_op_class_user_id",
 			Columns: []gormschema.Col[TestModelIndexOpClass]{
 				{Sel: func(m *TestModelIndexOpClass) any { return &m.TenantID }},
-				{Sel: func(m *TestModelIndexOpClass) any { return &m.UserID }, OpClass: "text_pattern_ops"},
+				gormschema.WithOpClass(gormschema.Field(func(m *TestModelIndexOpClass) any { return &m.UserID }), "text_pattern_ops"),
 				{Sel: func(m *TestModelIndexOpClass) any { return &m.UpdatedAt }, Sort: "desc"},
 				{Sel: func(m *TestModelIndexOpClass) any { return &m.SessionID }, Sort: "desc"},
 			},
