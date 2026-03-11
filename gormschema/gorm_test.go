@@ -75,6 +75,15 @@ func TestAutoMigrateModelIndexTypeEmptyUsesDatabaseDefault(t *testing.T) {
 	require.NotContains(t, sql, `USING btree`)
 }
 
+func TestAutoMigrateModelIndexOpClass(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(models.TestModelIndexOpClass{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_index_op_class_user_id" ON "test_model_index_op_class" ("tenant_id",user_id text_pattern_ops,"updated_at" desc,"session_id" desc);`)
+}
+
 func TestPostgreSQLConfig(t *testing.T) {
 	resetSession()
 	l := gormschema.New("postgres")

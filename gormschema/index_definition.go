@@ -15,9 +15,10 @@ import (
 
 // Column selector + per-column options.
 type Col[T any] struct {
-	Sel   func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
-	Sort  string       // "", "asc", "desc"
-	Nulls string       // "", "first", "last" (used as `sort:desc nulls last`)
+	Sel     func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
+	Sort    string       // "", "asc", "desc"
+	Nulls   string       // "", "first", "last" (used as `sort:desc nulls last`)
+	OpClass string       // PostgreSQL operator class for this index column (e.g. "text_pattern_ops")
 }
 
 func Field[T any](sel func(*T) any) Col[T] { return Col[T]{Sel: sel} }
@@ -172,6 +173,7 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			selF := col.FieldByName("Sel")   // func(*T) any
 			sortF := col.FieldByName("Sort") // string
 			nullF := col.FieldByName("Nulls")
+			opClassF := col.FieldByName("OpClass")
 
 			if !selF.IsValid() {
 				return nil, fmt.Errorf("Index %q column %d: missing Sel", name, j+1)
@@ -191,6 +193,15 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 					val = val + " nulls " + n
 				}
 				parts = append(parts, "sort:"+val)
+			}
+			if opClassF.IsValid() {
+				if opClass := strings.TrimSpace(opClassF.String()); opClass != "" {
+					dbColumnName, err := dbColumnNameForField(baseStruct, fname)
+					if err != nil {
+						return nil, fmt.Errorf("index %q column %d: %w", name, j+1, err)
+					}
+					parts = append(parts, "expression:"+dbColumnName+" "+opClass)
+				}
 			}
 			if j == 0 && unique {
 				parts = append(parts, "unique")
@@ -318,4 +329,18 @@ func indirectType(t reflect.Type) reflect.Type {
 		t = t.Elem()
 	}
 	return t
+}
+
+func dbColumnNameForField(baseStruct reflect.Type, fieldName string) (string, error) {
+	sf, ok := baseStruct.FieldByName(fieldName)
+	if !ok {
+		return "", fmt.Errorf("field %q not found on %s", fieldName, baseStruct.Name())
+	}
+
+	tagSettings := schema.ParseTagSetting(sf.Tag.Get("gorm"), ";")
+	if column := strings.TrimSpace(tagSettings["COLUMN"]); column != "" {
+		return column, nil
+	}
+
+	return schema.NamingStrategy{}.ColumnName("", sf.Name), nil
 }
