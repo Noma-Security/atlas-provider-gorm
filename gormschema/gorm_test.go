@@ -2,6 +2,7 @@ package gormschema_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,18 @@ func (*testModelNamingStrategyOpClass) Indexes() []gormschema.IndexDefinition[te
 type testModelInvalidIndexType struct {
 	ID   string
 	Name string
+}
+
+type tableAwareNamingStrategy struct {
+	gschema.NamingStrategy
+}
+
+func (ns tableAwareNamingStrategy) ColumnName(table, column string) string {
+	base := ns.NamingStrategy.ColumnName(table, column)
+	if table == "" {
+		return base
+	}
+	return strings.ReplaceAll(table, ".", "_") + "_" + base
 }
 
 func (testModelInvalidIndexType) TableName() string {
@@ -142,6 +155,17 @@ func TestAutoMigrateModelIndexOpClassHonorsNamingStrategy(t *testing.T) {
 	sql, err := l.Load(testModelNamingStrategyOpClass{})
 	require.NoError(t, err)
 	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_naming_strategy_op_class_user_id" ON "test_model_naming_strategy_op_class" ("TenantID","UserID" text_pattern_ops,"UpdatedAt" desc,"SessionID" desc);`)
+}
+
+func TestAutoMigrateModelIndexOpClassHonorsTableAwareNamingStrategy(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres", gormschema.WithConfig(&gorm.Config{
+		NamingStrategy: tableAwareNamingStrategy{NamingStrategy: gschema.NamingStrategy{}},
+	}))
+	sql, err := l.Load(testModelNamingStrategyOpClass{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_naming_strategy_op_class_user_id" ON "test_model_naming_strategy_op_class" ("test_model_naming_strategy_op_class_tenant_id","test_model_naming_strategy_op_class_user_id" text_pattern_ops,"test_model_naming_strategy_op_class_updated_at" desc,"test_model_naming_strategy_op_class_session_id" desc);`)
 }
 
 func TestAutoMigrateModelInvalidIndexType(t *testing.T) {

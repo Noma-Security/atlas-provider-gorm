@@ -87,8 +87,13 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 		return db.AutoMigrate(model)
 	}
 
+	schemaStmt := &gorm.Statement{DB: db}
+	if err := schemaStmt.Parse(model); err != nil {
+		return err
+	}
+
 	// Build field -> index-tag fragments from the returned definitions.
-	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(db, base, out)
+	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(db, schemaStmt.Schema, base, out)
 	if err != nil {
 		return err
 	}
@@ -133,7 +138,7 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 
 // -------- internals --------
 
-func collectIndexTagsFromIndexesValue(db *gorm.DB, baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
+func collectIndexTagsFromIndexesValue(db *gorm.DB, parsedSchema *schema.Schema, baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
 	fieldToIndexTags := map[string][]string{}
 
 	for i := 0; i < defsSlice.Len(); i++ {
@@ -207,7 +212,7 @@ func collectIndexTagsFromIndexesValue(db *gorm.DB, baseStruct reflect.Type, defs
 			}
 			if opClassF.IsValid() {
 				if opClass := strings.TrimSpace(opClassF.String()); opClass != "" {
-					dbColumnName, err := dbColumnNameForField(db, baseStruct, fname)
+					dbColumnName, err := dbColumnNameForField(db, parsedSchema, fname)
 					if err != nil {
 						return nil, fmt.Errorf("index %q column %d: %w", name, j+1, err)
 					}
@@ -342,22 +347,15 @@ func indirectType(t reflect.Type) reflect.Type {
 	return t
 }
 
-func dbColumnNameForField(db *gorm.DB, baseStruct reflect.Type, fieldName string) (string, error) {
-	sf, ok := baseStruct.FieldByName(fieldName)
-	if !ok {
-		return "", fmt.Errorf("field %q not found on %s", fieldName, baseStruct.Name())
+func dbColumnNameForField(db *gorm.DB, parsedSchema *schema.Schema, fieldName string) (string, error) {
+	if parsedSchema == nil {
+		return "", fmt.Errorf("parsed schema is nil")
 	}
-
-	tagSettings := schema.ParseTagSetting(sf.Tag.Get("gorm"), ";")
-	columnName := strings.TrimSpace(tagSettings["COLUMN"])
-	if columnName == "" {
-		namingStrategy := db.Config.NamingStrategy
-		if namingStrategy == nil {
-			namingStrategy = schema.NamingStrategy{}
-		}
-		columnName = namingStrategy.ColumnName("", sf.Name)
+	field, ok := parsedSchema.FieldsByName[fieldName]
+	if !ok {
+		return "", fmt.Errorf("field %q not found on schema %s", fieldName, parsedSchema.Name)
 	}
 
 	stmt := &gorm.Statement{DB: db}
-	return stmt.Quote(clause.Column{Name: columnName}), nil
+	return stmt.Quote(clause.Column{Name: field.DBName}), nil
 }
