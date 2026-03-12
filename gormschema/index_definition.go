@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -15,9 +17,10 @@ import (
 
 // Column selector + per-column options.
 type Col[T any] struct {
-	Sel   func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
-	Sort  string       // "", "asc", "desc"
-	Nulls string       // "", "first", "last" (used as `sort:desc nulls last`)
+	Sel     func(*T) any // MUST return a *pointer* to the struct field (e.g., `&m.TenantID`)
+	Sort    string       // "", "asc", "desc"
+	Nulls   string       // "", "first", "last" (used as `sort:desc nulls last`)
+	OpClass string       // PostgreSQL operator class for this index column (e.g. "text_pattern_ops")
 }
 
 func Field[T any](sel func(*T) any) Col[T] { return Col[T]{Sel: sel} }
@@ -25,11 +28,16 @@ func Asc[T any](c Col[T]) Col[T]           { c.Sort = "asc"; return c }
 func Desc[T any](c Col[T]) Col[T]          { c.Sort = "desc"; return c }
 func NullsFirst[T any](c Col[T]) Col[T]    { c.Nulls = "first"; return c }
 func NullsLast[T any](c Col[T]) Col[T]     { c.Nulls = "last"; return c }
+func WithOpClass[T any](c Col[T], opClass string) Col[T] {
+	c.OpClass = opClass
+	return c
+}
 
 // IndexDefinition declares a composite (or single-column) index.
 type IndexDefinition[T any] struct {
 	Name    string
 	Columns []Col[T] // order => priority:1..N
+	Type    string   // e.g. "gin", "btree", "brin"
 	Unique  bool
 	Where   string // e.g. "deleted_at IS NULL"
 }
@@ -79,8 +87,13 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 		return db.AutoMigrate(model)
 	}
 
+	schemaStmt := &gorm.Statement{DB: db}
+	if err := schemaStmt.Parse(model); err != nil {
+		return err
+	}
+
 	// Build field -> index-tag fragments from the returned definitions.
-	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(base, out)
+	fieldToIndexTags, err := collectIndexTagsFromIndexesValue(db, schemaStmt.Schema, base, out)
 	if err != nil {
 		return err
 	}
@@ -125,7 +138,7 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 
 // -------- internals --------
 
-func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
+func collectIndexTagsFromIndexesValue(db *gorm.DB, parsedSchema *schema.Schema, baseStruct reflect.Type, defsSlice reflect.Value) (map[string][]string, error) {
 	fieldToIndexTags := map[string][]string{}
 
 	for i := 0; i < defsSlice.Len(); i++ {
@@ -137,9 +150,11 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			return nil, fmt.Errorf("Indexes()[%d] is not a struct", i)
 		}
 
-		// Expect fields: Name string, Columns []Col[?], Unique bool, Where string
+		// Expect fields: Name string, Columns []Col[?], Unique bool, Where string.
+		// Type is optional for backward compatibility with older reflected shapes.
 		nameF := def.FieldByName("Name")
 		colsF := def.FieldByName("Columns")
+		typeF := def.FieldByName("Type")
 		uniqueF := def.FieldByName("Unique")
 		whereF := def.FieldByName("Where")
 
@@ -147,6 +162,15 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			return nil, fmt.Errorf("Indexes()[%d] doesn't look like IndexDefinition", i)
 		}
 		name := nameF.String()
+		indexType := ""
+		if typeF.IsValid() {
+			indexType = typeF.String()
+			switch indexType {
+			case "", "btree", "hash", "gist", "spgist", "gin", "brin":
+			default:
+				return nil, fmt.Errorf("index %q: invalid Type %q", name, indexType)
+			}
+		}
 		unique := uniqueF.Bool()
 		where := strings.TrimSpace(whereF.String())
 
@@ -165,6 +189,7 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 			selF := col.FieldByName("Sel")   // func(*T) any
 			sortF := col.FieldByName("Sort") // string
 			nullF := col.FieldByName("Nulls")
+			opClassF := col.FieldByName("OpClass")
 
 			if !selF.IsValid() {
 				return nil, fmt.Errorf("Index %q column %d: missing Sel", name, j+1)
@@ -185,8 +210,20 @@ func collectIndexTagsFromIndexesValue(baseStruct reflect.Type, defsSlice reflect
 				}
 				parts = append(parts, "sort:"+val)
 			}
+			if opClassF.IsValid() {
+				if opClass := strings.TrimSpace(opClassF.String()); opClass != "" {
+					dbColumnName, err := dbColumnNameForField(db, parsedSchema, fname)
+					if err != nil {
+						return nil, fmt.Errorf("index %q column %d: %w", name, j+1, err)
+					}
+					parts = append(parts, "expression:"+dbColumnName+" "+opClass)
+				}
+			}
 			if j == 0 && unique {
 				parts = append(parts, "unique")
+			}
+			if j == 0 && indexType != "" {
+				parts = append(parts, "type:"+indexType)
 			}
 			if j == 0 && where != "" {
 				parts = append(parts, "where:"+where)
@@ -261,7 +298,7 @@ func buildStructTag(kv map[string]string) reflect.StructTag {
 	}
 	parts := make([]string, 0, len(kv))
 	for k, v := range kv {
-		parts = append(parts, fmt.Sprintf(`%s:"%s"`, k, v))
+		parts = append(parts, fmt.Sprintf(`%s:%s`, k, strconv.Quote(v)))
 	}
 	sort.Strings(parts) // deterministic
 	return reflect.StructTag(strings.Join(parts, " "))
@@ -308,4 +345,17 @@ func indirectType(t reflect.Type) reflect.Type {
 		t = t.Elem()
 	}
 	return t
+}
+
+func dbColumnNameForField(db *gorm.DB, parsedSchema *schema.Schema, fieldName string) (string, error) {
+	if parsedSchema == nil {
+		return "", fmt.Errorf("parsed schema is nil")
+	}
+	field, ok := parsedSchema.FieldsByName[fieldName]
+	if !ok {
+		return "", fmt.Errorf("field %q not found on schema %s", fieldName, parsedSchema.Name)
+	}
+
+	stmt := &gorm.Statement{DB: db}
+	return stmt.Quote(clause.Column{Name: field.DBName}), nil
 }

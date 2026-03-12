@@ -2,7 +2,9 @@ package gormschema_test
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"ariga.io/atlas-provider-gorm/gormschema"
 	ckmodels "ariga.io/atlas-provider-gorm/internal/testdata/circularfks"
@@ -11,7 +13,67 @@ import (
 	"ariga.io/atlas/sdk/recordriver"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	gschema "gorm.io/gorm/schema"
 )
+
+type testModelNamingStrategyOpClass struct {
+	ID        string
+	TenantID  string
+	UserID    *string
+	UpdatedAt *time.Time
+	SessionID string
+}
+
+func (testModelNamingStrategyOpClass) TableName() string {
+	return "test_model_naming_strategy_op_class"
+}
+
+func (*testModelNamingStrategyOpClass) Indexes() []gormschema.IndexDefinition[testModelNamingStrategyOpClass] {
+	return []gormschema.IndexDefinition[testModelNamingStrategyOpClass]{
+		{
+			Name: "idx_test_model_naming_strategy_op_class_user_id",
+			Columns: []gormschema.Col[testModelNamingStrategyOpClass]{
+				{Sel: func(m *testModelNamingStrategyOpClass) any { return &m.TenantID }},
+				gormschema.WithOpClass(gormschema.Field(func(m *testModelNamingStrategyOpClass) any { return &m.UserID }), "text_pattern_ops"),
+				{Sel: func(m *testModelNamingStrategyOpClass) any { return &m.UpdatedAt }, Sort: "desc"},
+				{Sel: func(m *testModelNamingStrategyOpClass) any { return &m.SessionID }, Sort: "desc"},
+			},
+		},
+	}
+}
+
+type testModelInvalidIndexType struct {
+	ID   string
+	Name string
+}
+
+type tableAwareNamingStrategy struct {
+	gschema.NamingStrategy
+}
+
+func (ns tableAwareNamingStrategy) ColumnName(table, column string) string {
+	base := ns.NamingStrategy.ColumnName(table, column)
+	if table == "" {
+		return base
+	}
+	return strings.ReplaceAll(table, ".", "_") + "_" + base
+}
+
+func (testModelInvalidIndexType) TableName() string {
+	return "test_model_invalid_index_type"
+}
+
+func (*testModelInvalidIndexType) Indexes() []gormschema.IndexDefinition[testModelInvalidIndexType] {
+	return []gormschema.IndexDefinition[testModelInvalidIndexType]{
+		{
+			Name: "idx_test_model_invalid_index_type_name",
+			Type: "gin()",
+			Columns: []gormschema.Col[testModelInvalidIndexType]{
+				gormschema.Field(func(m *testModelInvalidIndexType) any { return &m.Name }),
+			},
+		},
+	}
+}
 
 func TestSQLiteConfig(t *testing.T) {
 	resetSession()
@@ -54,6 +116,66 @@ func TestAutoMigrateModelTableName(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoMigrateModelIndexType(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(models.TestModelIndexType{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_index_type_name_gin" ON "test_model_index_type" USING gin("name");`)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_index_type_name_profile_gin" ON "test_model_index_type" USING gin("name","profile");`)
+}
+
+func TestAutoMigrateModelIndexTypeEmptyUsesDatabaseDefault(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(models.TestModelValueReceiver{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE UNIQUE INDEX IF NOT EXISTS "idx_test_model_unique" ON "test_model_value_receiver" ("name","age");`)
+	require.NotContains(t, sql, `USING btree`)
+}
+
+func TestAutoMigrateModelIndexOpClass(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(models.TestModelIndexOpClass{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_index_op_class_user_id" ON "test_model_index_op_class" ("tenant_id","user_id" text_pattern_ops,"updated_at" desc,"session_id" desc);`)
+}
+
+func TestAutoMigrateModelIndexOpClassHonorsNamingStrategy(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres", gormschema.WithConfig(&gorm.Config{
+		NamingStrategy: gschema.NamingStrategy{NoLowerCase: true},
+	}))
+	sql, err := l.Load(testModelNamingStrategyOpClass{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_naming_strategy_op_class_user_id" ON "test_model_naming_strategy_op_class" ("TenantID","UserID" text_pattern_ops,"UpdatedAt" desc,"SessionID" desc);`)
+}
+
+func TestAutoMigrateModelIndexOpClassHonorsTableAwareNamingStrategy(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres", gormschema.WithConfig(&gorm.Config{
+		NamingStrategy: tableAwareNamingStrategy{NamingStrategy: gschema.NamingStrategy{}},
+	}))
+	sql, err := l.Load(testModelNamingStrategyOpClass{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_test_model_naming_strategy_op_class_user_id" ON "test_model_naming_strategy_op_class" ("test_model_naming_strategy_op_class_tenant_id","test_model_naming_strategy_op_class_user_id" text_pattern_ops,"test_model_naming_strategy_op_class_updated_at" desc,"test_model_naming_strategy_op_class_session_id" desc);`)
+}
+
+func TestAutoMigrateModelInvalidIndexType(t *testing.T) {
+	resetSession()
+
+	_, err := gormschema.New("postgres").Load(testModelInvalidIndexType{})
+	require.Error(t, err)
+	require.ErrorContains(t, err, `invalid Type "gin()"`)
+}
+
 func TestPostgreSQLConfig(t *testing.T) {
 	resetSession()
 	l := gormschema.New("postgres")
