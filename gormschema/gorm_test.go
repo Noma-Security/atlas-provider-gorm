@@ -47,6 +47,57 @@ type testModelInvalidIndexType struct {
 	Name string
 }
 
+type EmbeddedIndexBase struct {
+	TenantID string
+	PolicyID string
+}
+
+type EmbeddedIndexLevel2 struct {
+	EmbeddedIndexBase
+}
+
+type embeddedIndexModel struct {
+	ID string
+	EmbeddedIndexBase
+}
+
+type embeddedDeepIndexModel struct {
+	ID string
+	EmbeddedIndexLevel2
+}
+
+func (embeddedIndexModel) TableName() string {
+	return "embedded_index_model"
+}
+
+func (embeddedDeepIndexModel) TableName() string {
+	return "embedded_deep_index_model"
+}
+
+func (*embeddedIndexModel) Indexes() []gormschema.IndexDefinition[embeddedIndexModel] {
+	return []gormschema.IndexDefinition[embeddedIndexModel]{
+		{
+			Name: "idx_embedded_index_model_tenant_policy",
+			Columns: []gormschema.Col[embeddedIndexModel]{
+				gormschema.Field(func(m *embeddedIndexModel) any { return &m.TenantID }),
+				gormschema.Field(func(m *embeddedIndexModel) any { return &m.PolicyID }),
+			},
+		},
+	}
+}
+
+func (*embeddedDeepIndexModel) Indexes() []gormschema.IndexDefinition[embeddedDeepIndexModel] {
+	return []gormschema.IndexDefinition[embeddedDeepIndexModel]{
+		{
+			Name: "idx_embedded_deep_index_model_tenant_policy",
+			Columns: []gormschema.Col[embeddedDeepIndexModel]{
+				gormschema.Field(func(m *embeddedDeepIndexModel) any { return &m.TenantID }),
+				gormschema.Field(func(m *embeddedDeepIndexModel) any { return &m.PolicyID }),
+			},
+		},
+	}
+}
+
 type tableAwareNamingStrategy struct {
 	gschema.NamingStrategy
 }
@@ -135,6 +186,24 @@ func TestAutoMigrateModelIndexTypeEmptyUsesDatabaseDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, sql, `CREATE UNIQUE INDEX IF NOT EXISTS "idx_test_model_unique" ON "test_model_value_receiver" ("name","age");`)
 	require.NotContains(t, sql, `USING btree`)
+}
+
+func TestAutoMigrateModelEmbeddedIndexSelectors(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(embeddedIndexModel{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_embedded_index_model_tenant_policy" ON "embedded_index_model" ("tenant_id","policy_id");`)
+}
+
+func TestAutoMigrateModelDeepEmbeddedIndexSelectors(t *testing.T) {
+	resetSession()
+
+	l := gormschema.New("postgres")
+	sql, err := l.Load(embeddedDeepIndexModel{})
+	require.NoError(t, err)
+	require.Contains(t, sql, `CREATE INDEX IF NOT EXISTS "idx_embedded_deep_index_model_tenant_policy" ON "embedded_deep_index_model" ("tenant_id","policy_id");`)
 }
 
 func TestAutoMigrateModelIndexOpClass(t *testing.T) {
