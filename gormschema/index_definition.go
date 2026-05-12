@@ -248,16 +248,16 @@ func fieldNameFromSelectorValue(sel reflect.Value) (string, error) {
 	if res.Kind() != reflect.Ptr || res.IsNil() {
 		return "", fmt.Errorf("Sel must return a *field (pointer)")
 	}
-	retPtr := res.Pointer()
+	selectedFieldPtr := res.Pointer()
 
 	// Compare against addresses of exported fields on T, including fields
 	// reachable through anonymous embedded structs.
-	v := ptrToT.Elem()
-	if name, ok := findExportedFieldNameByPointer(v, retPtr); ok {
+	modelValue := ptrToT.Elem()
+	if name, ok := findExportedFieldNameByPointer(modelValue, selectedFieldPtr); ok {
 		return name, nil
 	}
-	t := v.Type()
-	return "", fmt.Errorf("Sel didn't point to an exported field on %s", t.Name())
+	modelType := modelValue.Type()
+	return "", fmt.Errorf("Sel didn't point to an exported field on %s", modelType.Name())
 }
 
 func findExportedFieldNameByPointer(v reflect.Value, targetPtr uintptr) (string, bool) {
