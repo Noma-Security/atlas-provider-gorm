@@ -98,24 +98,9 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 		return err
 	}
 
-	// Build cloned struct type with merged tags.
-	fields := make([]reflect.StructField, 0, base.NumField())
-	for i := 0; i < base.NumField(); i++ {
-		sf := base.Field(i)
-		// Keep only exported fields; GORM ignores unexported columns anyway.
-		if sf.PkgPath != "" {
-			continue
-		}
-		newTag := mergeIndexIntoGormTag(sf.Tag, fieldToIndexTags[sf.Name])
-		fields = append(fields, reflect.StructField{
-			Name:      sf.Name,
-			Type:      sf.Type,
-			Tag:       newTag,
-			Anonymous: sf.Anonymous,
-		})
-	}
-
-	dyn := reflect.StructOf(fields)
+	// Build a unified struct type with merged index tags, including promoted fields
+	// coming from anonymous embedded structs.
+	dyn := createUnifiedStructType(base, fieldToIndexTags)
 	ptr := reflect.New(dyn).Interface()
 
 	// Respect custom table name if model implements Tabler.
@@ -263,22 +248,100 @@ func fieldNameFromSelectorValue(sel reflect.Value) (string, error) {
 	if res.Kind() != reflect.Ptr || res.IsNil() {
 		return "", fmt.Errorf("Sel must return a *field (pointer)")
 	}
-	retPtr := res.Pointer()
+	selectedFieldPtr := res.Pointer()
 
-	// Compare against addresses of top-level exported fields on T
-	v := ptrToT.Elem()
+	// Compare against addresses of exported fields on T, including fields
+	// reachable through anonymous embedded structs.
+	modelValue := ptrToT.Elem()
+	if name, ok := findExportedFieldNameByPointer(modelValue, selectedFieldPtr); ok {
+		return name, nil
+	}
+	modelType := modelValue.Type()
+	return "", fmt.Errorf("Sel didn't point to an exported field on %s", modelType.Name())
+}
+
+func findExportedFieldNameByPointer(v reflect.Value, targetPtr uintptr) (string, bool) {
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		sf := t.Field(i)
-		if sf.PkgPath != "" { // unexported
+		if sf.PkgPath != "" { // unexported field
 			continue
 		}
 		fv := v.Field(i)
-		if fv.CanAddr() && fv.Addr().Pointer() == retPtr {
-			return sf.Name, nil
+		// In reflect.StructField, Anonymous marks an embedded field in the model.
+		embeddedStructValue, hasEmbeddedStructValue := embeddedStructValueFromAnonymousField(fv, sf.Anonymous)
+		if hasEmbeddedStructValue {
+			if name, ok := findExportedFieldNameByPointer(embeddedStructValue, targetPtr); ok {
+				return name, true
+			}
+		}
+		isAnonymousStructLike := sf.Anonymous && isStructLikeType(sf.Type)
+		if isAnonymousStructLike {
+			continue
+		}
+		if fv.CanAddr() && fv.Addr().Pointer() == targetPtr {
+			return sf.Name, true
 		}
 	}
-	return "", fmt.Errorf("Sel didn't point to a top-level exported field on %s", t.Name())
+	return "", false
+}
+
+func embeddedStructValueFromAnonymousField(fieldValue reflect.Value, isAnonymousField bool) (reflect.Value, bool) {
+	if !isAnonymousField {
+		return reflect.Value{}, false
+	}
+
+	switch fieldValue.Kind() {
+	case reflect.Struct:
+		return fieldValue, true
+	case reflect.Pointer:
+		if !fieldValue.IsNil() && fieldValue.Elem().Kind() == reflect.Struct {
+			return fieldValue.Elem(), true
+		}
+	}
+
+	return reflect.Value{}, false
+}
+
+func isStructLikeType(fieldType reflect.Type) bool {
+	if fieldType.Kind() == reflect.Struct {
+		return true
+	}
+	return fieldType.Kind() == reflect.Pointer && fieldType.Elem().Kind() == reflect.Struct
+}
+
+// createUnifiedStructType recursively clones the model type and merges index tags
+// into all exported fields, including fields promoted by anonymous embedded structs.
+func createUnifiedStructType(base reflect.Type, fieldToIndexTags map[string][]string) reflect.Type {
+	fields := make([]reflect.StructField, 0, base.NumField())
+	for i := 0; i < base.NumField(); i++ {
+		sf := base.Field(i)
+		// Keep only exported fields; GORM ignores unexported columns anyway.
+		if sf.PkgPath != "" {
+			continue
+		}
+
+		fieldType := sf.Type
+		if sf.Anonymous {
+			switch sf.Type.Kind() {
+			case reflect.Struct:
+				fieldType = createUnifiedStructType(sf.Type, fieldToIndexTags)
+			case reflect.Pointer:
+				if sf.Type.Elem().Kind() == reflect.Struct {
+					fieldType = reflect.PointerTo(createUnifiedStructType(sf.Type.Elem(), fieldToIndexTags))
+				}
+			}
+		}
+
+		fields = append(fields, reflect.StructField{
+			Name:      sf.Name,
+			Type:      fieldType,
+			Tag:       mergeIndexIntoGormTag(sf.Tag, fieldToIndexTags[sf.Name]),
+			Anonymous: sf.Anonymous,
+		})
+	}
+
+	return reflect.StructOf(fields)
 }
 
 var tagKV = regexp.MustCompile(`(\w+):"([^"]*)"`)
