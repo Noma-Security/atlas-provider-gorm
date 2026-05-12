@@ -98,8 +98,9 @@ func AutoMigrateModel(db *gorm.DB, model any) error {
 		return err
 	}
 
-	// Build cloned struct type with merged tags (including anonymous embedded fields).
-	dyn := cloneStructTypeWithMergedTags(base, fieldToIndexTags)
+	// Build a unified struct type with merged index tags, including promoted fields
+	// coming from anonymous embedded structs.
+	dyn := createUnifiedStructType(base, fieldToIndexTags)
 	ptr := reflect.New(dyn).Interface()
 
 	// Respect custom table name if model implements Tabler.
@@ -256,7 +257,7 @@ func fieldNameFromSelectorValue(sel reflect.Value) (string, error) {
 		return name, nil
 	}
 	t := v.Type()
-	return "", fmt.Errorf("Sel didn't point to a top-level exported field on %s", t.Name())
+	return "", fmt.Errorf("Sel didn't point to an exported field on %s", t.Name())
 }
 
 func findExportedFieldNameByPointer(v reflect.Value, targetPtr uintptr) (string, bool) {
@@ -267,21 +268,15 @@ func findExportedFieldNameByPointer(v reflect.Value, targetPtr uintptr) (string,
 			continue
 		}
 		fv := v.Field(i)
-		if sf.Anonymous {
-			switch fv.Kind() {
-			case reflect.Struct:
-				if name, ok := findExportedFieldNameByPointer(fv, targetPtr); ok {
-					return name, true
-				}
-			case reflect.Pointer:
-				if !fv.IsNil() && fv.Elem().Kind() == reflect.Struct {
-					if name, ok := findExportedFieldNameByPointer(fv.Elem(), targetPtr); ok {
-						return name, true
-					}
-				}
+		// In reflect.StructField, Anonymous marks an embedded field in the model.
+		embeddedStructValue, hasEmbeddedStructValue := embeddedStructValueFromAnonymousField(fv, sf.Anonymous)
+		if hasEmbeddedStructValue {
+			if name, ok := findExportedFieldNameByPointer(embeddedStructValue, targetPtr); ok {
+				return name, true
 			}
 		}
-		if sf.Anonymous && (sf.Type.Kind() == reflect.Struct || (sf.Type.Kind() == reflect.Pointer && sf.Type.Elem().Kind() == reflect.Struct)) {
+		isAnonymousStructLike := sf.Anonymous && isStructLikeType(sf.Type)
+		if isAnonymousStructLike {
 			continue
 		}
 		if fv.CanAddr() && fv.Addr().Pointer() == targetPtr {
@@ -291,7 +286,33 @@ func findExportedFieldNameByPointer(v reflect.Value, targetPtr uintptr) (string,
 	return "", false
 }
 
-func cloneStructTypeWithMergedTags(base reflect.Type, fieldToIndexTags map[string][]string) reflect.Type {
+func embeddedStructValueFromAnonymousField(fieldValue reflect.Value, isAnonymousField bool) (reflect.Value, bool) {
+	if !isAnonymousField {
+		return reflect.Value{}, false
+	}
+
+	switch fieldValue.Kind() {
+	case reflect.Struct:
+		return fieldValue, true
+	case reflect.Pointer:
+		if !fieldValue.IsNil() && fieldValue.Elem().Kind() == reflect.Struct {
+			return fieldValue.Elem(), true
+		}
+	}
+
+	return reflect.Value{}, false
+}
+
+func isStructLikeType(fieldType reflect.Type) bool {
+	if fieldType.Kind() == reflect.Struct {
+		return true
+	}
+	return fieldType.Kind() == reflect.Pointer && fieldType.Elem().Kind() == reflect.Struct
+}
+
+// createUnifiedStructType recursively clones the model type and merges index tags
+// into all exported fields, including fields promoted by anonymous embedded structs.
+func createUnifiedStructType(base reflect.Type, fieldToIndexTags map[string][]string) reflect.Type {
 	fields := make([]reflect.StructField, 0, base.NumField())
 	for i := 0; i < base.NumField(); i++ {
 		sf := base.Field(i)
@@ -304,10 +325,10 @@ func cloneStructTypeWithMergedTags(base reflect.Type, fieldToIndexTags map[strin
 		if sf.Anonymous {
 			switch sf.Type.Kind() {
 			case reflect.Struct:
-				fieldType = cloneStructTypeWithMergedTags(sf.Type, fieldToIndexTags)
+				fieldType = createUnifiedStructType(sf.Type, fieldToIndexTags)
 			case reflect.Pointer:
 				if sf.Type.Elem().Kind() == reflect.Struct {
-					fieldType = reflect.PointerTo(cloneStructTypeWithMergedTags(sf.Type.Elem(), fieldToIndexTags))
+					fieldType = reflect.PointerTo(createUnifiedStructType(sf.Type.Elem(), fieldToIndexTags))
 				}
 			}
 		}
